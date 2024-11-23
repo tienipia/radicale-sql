@@ -2,3 +2,5 @@ radicale
 sqlalchemy
 pytest
 requests
+caldav
+psycopg
