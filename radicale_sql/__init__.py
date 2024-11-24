@@ -6,6 +6,7 @@ import binascii
 import datetime
 import zoneinfo
 import uuid
+import re
 import string
 import itertools
 import json
@@ -13,6 +14,7 @@ from hashlib import sha256
 from typing import Optional, Union, Tuple, Iterable, Iterator, Mapping, Set
 import radicale.types
 from radicale.auth import BaseAuth
+from radicale.rights import BaseRights
 from radicale.storage import BaseStorage, BaseCollection
 from radicale.log import logger
 from radicale import item as radicale_item
@@ -32,6 +34,14 @@ PLUGIN_CONFIG_SCHEMA = {
         },
     },
 }
+
+
+def is_valid_uuid(val):
+    try:
+        uuid.UUID(str(val))
+        return True
+    except ValueError:
+        return False
 
 
 @lru_cache(maxsize=50)
@@ -60,6 +70,25 @@ def my_expensive_function(email, password, ttl_hash=None):
 def get_ttl_hash(seconds=60):
     """Return the same value withing `seconds` time period"""
     return round(time.time() / seconds)
+
+
+class Rights(BaseRights):
+    def authorization(self, user: str, path: str) -> str:
+        if user == "":
+            return ""
+
+        if path == "/":
+            return "R"
+        elif path == "/domain/":
+            return "R"
+        elif path == ("/" + user + "/"):
+            return "RW"
+        elif path.startswith("/" + user + "/"):
+            return "rw"
+        elif bool(re.match(r"/[^/]+/[^/]+", path)):
+            return "r"
+
+        return ""
 
 
 class Auth(BaseAuth):
@@ -187,6 +216,25 @@ class Collection(BaseCollection):
     def _upload(
         self, href: str, item: "radicale_item.Item", *, connection
     ) -> "radicale_item.Item":
+
+        if href.endswith(".vcf"):
+            item_id = href.split(".vcf")[0]
+            if is_valid_uuid(item_id):
+                item_id = uuid.UUID(item_id)
+            else:
+                item_id = uuid.uuid4()
+                href = str(item_id) + ".vcf"
+            item.uid = str(item_id)
+        elif href.endswith(".ics"):
+            item_id = href.split(".ics")[0]
+            if is_valid_uuid(item_id):
+                item_id = uuid.UUID(item_id)
+            else:
+                item_id = uuid.uuid4()
+                href = str(item_id) + ".ics"
+        else:
+            raise ValueError("Invalid file extension")
+
         item_table = self._storage._meta.tables["cas.item"]
 
         parsed_data = {
@@ -269,6 +317,7 @@ class Collection(BaseCollection):
         insert_stmt = sa.insert(
             item_table,
         ).values(
+            id=item_id,
             collection_id=self._id,
             name=href,
             data=item_serialized,
@@ -308,6 +357,7 @@ class Collection(BaseCollection):
                 sa.and_(
                     item_table.c.collection_id == self._id,
                     item_table.c.name == href,
+                    item_table.c.id == item_id,
                 ),
             )
         )
@@ -720,6 +770,23 @@ class Storage(BaseStorage):
         self._engine, self._root_collection = db.create(
             self.configuration.get("storage", "url"), self._meta
         )
+        with self._engine.begin() as c:
+            collection_table = self._meta.tables["cas.collection"]
+            select_stmt = (
+                sa.select(
+                    collection_table.c,
+                )
+                .select_from(
+                    collection_table,
+                )
+                .where(
+                    sa.and_(
+                        collection_table.c.parent_id == self._root_collection.id,
+                        collection_table.c.name == "domain",
+                    ),
+                )
+            )
+            self._domain_collection = c.execute(select_stmt).one()
 
     def _split_path(self, path: str):
         path_parts = path.split("/")
@@ -967,7 +1034,13 @@ class Storage(BaseStorage):
             elif tag == "VCALENDAR":
                 collection_tag = 1
 
-        for p in path:
+        if len(path) == 2:
+            if not is_valid_uuid(path[1]):
+                path = [path[0], str(uuid.uuid4())]
+        elif len(path) > 2:
+            raise ValueError("Invalid path")
+
+        for i, p in enumerate(path):
             select_stmt = (
                 sa.select(
                     collection_table.c,
@@ -989,6 +1062,7 @@ class Storage(BaseStorage):
                         collection_table,
                     )
                     .values(
+                        id=uuid.UUID(path[1]) if i == 1 else uuid.uuid4(),
                         domain_id=1,
                         tag=collection_tag,
                         parent_id=parent_id,

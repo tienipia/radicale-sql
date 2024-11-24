@@ -21,7 +21,6 @@ def create_meta() -> sa.MetaData:
         sa.Column(
             "id",
             sa.Uuid(),
-            default=uuid.uuid4,
             primary_key=True,
         ),
         sa.Column(
@@ -107,7 +106,6 @@ def create_meta() -> sa.MetaData:
         sa.Column(
             "id",
             sa.Uuid(),
-            default=uuid.uuid4,
             primary_key=True,
         ),
         sa.Column(
